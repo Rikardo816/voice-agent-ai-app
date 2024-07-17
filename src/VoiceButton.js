@@ -4,55 +4,16 @@ function VoiceButton() {
   const [buttonState, setButtonState] = useState('idle'); // 'idle', 'listening', 'processing', 'ready'
   const [transcript, setTranscript] = useState('');
   const [serverResponse, setServerResponse] = useState('');
-  const [recognition, setRecognition] = useState(null);
+  const recognitionRef = useRef(null);
   const socketRef = useRef(null);
   const sessionId = useRef(Date.now());
   const conversationId = useRef(1);
 
-  const connectWebSocket = useCallback(() => {
-    if (socketRef.current) return;
-
-    const ws = new WebSocket(`ws://localhost:8001/ws/${sessionId.current}/${conversationId.current}`);
-
-    ws.onopen = () => {
-      console.log('WebSocket Conectado');
-      setButtonState('ready');
-    };
-
-    ws.onmessage = (event) => {
-      const response = event.data;
-      console.log('Texto recibido del servidor:', response);
-      setServerResponse(response);
-      speakServerResponse(response);
-      setButtonState('ready');
-    };
-
-    ws.onerror = (error) => {
-      console.error('Error de WebSocket:', error);
-      setButtonState('idle');
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket Desconectado');
-      setButtonState('idle');
-      socketRef.current = null;
-    };
-
-    socketRef.current = ws;
-  }, []);
-
-  const disconnectWebSocket = useCallback(() => {
-    if (socketRef.current) {
-      socketRef.current.close();
-      socketRef.current = null;
-    }
-    setButtonState('idle');
-  }, []);
-
-  useEffect(() => {
+  const initializeSpeechRecognition = useCallback(() => {
+    console.log('Inicializando reconocimiento de voz...');
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     
-    if (SpeechRecognition) {
+    if (SpeechRecognition && !recognitionRef.current) {
       const recognitionInstance = new SpeechRecognition();
       recognitionInstance.continuous = false;
       recognitionInstance.interimResults = true;
@@ -73,6 +34,7 @@ function VoiceButton() {
 
       recognitionInstance.onend = () => {
         if (buttonState === 'listening') {
+          console.log('Reconocimiento de voz terminado');
           setButtonState('processing');
         }
       };
@@ -82,15 +44,82 @@ function VoiceButton() {
         setButtonState('ready');
       };
 
-      setRecognition(recognitionInstance);
-    } else {
+      recognitionRef.current = recognitionInstance;
+      console.log('Speech Recognition inicializado');
+    } else if (!SpeechRecognition) {
       console.error('El reconocimiento de voz no está soportado en este navegador.');
     }
+  }, []);
 
-    return () => {
-      disconnectWebSocket();
+
+  const connectWebSocket = useCallback(() => {
+    if (socketRef.current) return;
+    
+    setButtonState('connecting');
+    const ws = new WebSocket(`ws://localhost:8001/ws/${sessionId.current}/${conversationId.current}`);
+
+    ws.onopen = () => {
+      console.log('WebSocket Conectado');
+      socketRef.current = ws;
+      sendInitialMessage();
     };
-  }, [disconnectWebSocket]);
+
+    ws.onmessage = (event) => {
+      const response = event.data;
+      console.log('Texto recibido del servidor:', response);
+      setServerResponse(response);
+      setButtonState('processing');
+      speakServerResponse(response);
+    };
+
+    ws.onerror = (error) => {
+      console.error('Error de WebSocket:', error);
+      setButtonState('idle');
+    };
+
+    ws.onclose = (event) => {
+      console.log('WebSocket Desconectado', event.code, event.reason);
+      setButtonState('idle');
+      socketRef.current = null;
+    };
+
+  }, []);
+
+  const sendInitialMessage = useCallback(() => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      const payload = JSON.stringify({ message: "Hola que tal?" });
+      socketRef.current.send(payload);
+      console.log('Mensaje inicial enviado al servidor:', payload);
+      setButtonState('processing');
+      console.log('Estado cambiado a processing después de enviar mensaje inicial');
+    } else {
+      console.error('WebSocket no está listo para enviar el mensaje inicial.');
+    }
+  }, []);
+
+
+  const startListening = useCallback(() => {
+    console.log('Intentando iniciar reconocimiento de voz');
+    console.log('recognitionRef.current', recognitionRef.current);
+    console.log('buttonState', buttonState);
+    if (recognitionRef.current && buttonState === 'ready') {
+      setButtonState('listening');
+      recognitionRef.current.start();
+      console.log('Reconocimiento de voz iniciado');
+    } else {
+      console.error('Recognition no está inicializado o el estado no es correcto');
+    }
+  }, [buttonState]);
+
+  useEffect(() => {
+    console.log('Llamando a initializeSpeechRecognition');
+    initializeSpeechRecognition();
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
+    };
+  }, [initializeSpeechRecognition]);
 
   const sendMessageToServer = useCallback((message) => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -105,31 +134,38 @@ function VoiceButton() {
   const handleButtonClick = useCallback(() => {
     if (buttonState === 'idle') {
       connectWebSocket();
-    } else if (buttonState === 'ready') {
-      recognition.start();
-      setButtonState('listening');
-    } else if (buttonState === 'listening') {
-      recognition.stop();
-      setButtonState('processing');
-    } else if (buttonState === 'processing') {
-      // No hacer nada, esperando respuesta del servidor
-    } else {
-      disconnectWebSocket();
     }
-  }, [buttonState, connectWebSocket, disconnectWebSocket, recognition]);
+  }, [buttonState, connectWebSocket]);
 
   const speakServerResponse = (text) => {
     const speech = new SpeechSynthesisUtterance(text);
     speech.lang = 'es-ES';
+    speech.onend = () => {
+      console.log('Reproducción de audio terminada');
+      console.log('Cambiando estado a ready');
+      setButtonState('ready');
+    };
     window.speechSynthesis.speak(speech);
   };
+
+  useEffect(() => {
+    if (buttonState === 'ready') {
+      console.log('Estado cambiado a ready, iniciando reconocimiento de voz');
+      startListening();
+    }
+  }, [buttonState, startListening]);
+
+  useEffect(() => {
+    console.log('buttonState cambiado a:', buttonState);
+  }, [buttonState]);
 
   const getButtonColor = () => {
     switch (buttonState) {
       case 'idle': return 'grey';
-      case 'ready': return 'green';
+      case 'connecting': return 'yellow';
       case 'listening': return 'red';
       case 'processing': return 'orange';
+      case 'ready': return 'green';
       default: return 'grey';
     }
   };
@@ -137,9 +173,10 @@ function VoiceButton() {
   const getButtonText = () => {
     switch (buttonState) {
       case 'idle': return 'Conectar';
-      case 'ready': return 'Hablar';
-      case 'listening': return 'Detener';
+      case 'connecting': return 'Conectando...';
+      case 'listening': return 'Escuchando...';
       case 'processing': return 'Procesando...';
+      case 'ready': return 'Listo';
       default: return 'Conectar';
     }
   };
@@ -148,6 +185,7 @@ function VoiceButton() {
     <div>
       <button
         onClick={handleButtonClick}
+        disabled={buttonState !== 'idle'}
         style={{
           padding: '20px',
           fontSize: '24px',
@@ -155,7 +193,7 @@ function VoiceButton() {
           border: 'none',
           background: getButtonColor(),
           color: 'white',
-          cursor: buttonState === 'processing' ? 'not-allowed' : 'pointer'
+          cursor: buttonState === 'idle' ? 'pointer' : 'not-allowed'
         }}
       >
         {getButtonText()}
